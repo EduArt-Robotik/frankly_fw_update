@@ -29,6 +29,9 @@ pub struct CANInterface {
 
     /// Timeout for receiving messages
     timeout: Duration,
+
+    // Broadcast or specific node communication?
+    mode: ComMode,
 }
 
 impl CANInterface {
@@ -49,6 +52,7 @@ impl ComInterface for CANInterface {
         Ok(CANInterface {
             socket: None,
             timeout: CAN_RX_TIMEOUT,
+            mode: ComMode::Broadcast,
         })
     }
 
@@ -63,6 +67,18 @@ impl ComInterface for CANInterface {
                 socket
                     .set_read_timeout(Some(self.timeout))
                     .map_err(|_e| Error::Error("Failed to set rx timeout!".to_string()))?;
+
+                // \todo extract filtering into own function, because it is also used in set_mode()
+
+                // Set ID and Mask to receive answers only from bootloader nodes
+                let can_rx_msg_id = CAN_BROADCAST_ID;
+                let can_rx_msg_mask = 0x7F0;
+                // Set filter
+                let filter = CanFilter::new(can_rx_msg_id, can_rx_msg_mask);
+
+                socket
+                    .set_filters(&[filter])
+                    .map_err(|e| Error::Error(format!("Failed to set filter: {}", e)))?;
 
                 // clear rx messages
                 while socket.read_frame().is_ok() {}
@@ -83,6 +99,7 @@ impl ComInterface for CANInterface {
         true
     }
 
+    // \todo: current behaviour: scan network fails with error if the first node doesnt respond. expected behaviour: scan network should still wait for other nodes responses
     fn scan_network(&mut self) -> Result<Vec<u8>, Error> {
         // Config interface to broadcast
         self.set_mode(ComMode::Broadcast)?;
@@ -115,17 +132,14 @@ impl ComInterface for CANInterface {
     }
 
     fn set_mode(&mut self, mode: ComMode) -> Result<(), Error> {
+        self.mode = mode;
         match self.socket.as_mut() {
             Some(socket) => {
-                let mut can_rx_msg_id = 0;
-                let mut can_rx_msg_mask = 0;
-
-                // Set ID and MASK only if no broadcast is used
-                if let ComMode::Specific(node_id) = mode {
-                    can_rx_msg_id = CAN_BASE_ID + node_id as u32 * 2 + 1;
-                    can_rx_msg_mask = 0x7FF;
-                }
-
+                // Set ID and Mask dependent on the mode
+                let (can_rx_msg_id, can_rx_msg_mask) = match mode {
+                    ComMode::Broadcast => (CAN_BROADCAST_ID, 0x7F0),
+                    ComMode::Specific(node_id) => (CAN_BASE_ID + node_id as u32 * 2 + 1, 0x7FF),
+                };
                 // Set filter
                 let filter = CanFilter::new(can_rx_msg_id, can_rx_msg_mask);
                 match socket.set_filters(&[filter]) {
@@ -158,8 +172,13 @@ impl ComInterface for CANInterface {
     fn send(&mut self, msg: &Msg) -> Result<(), Error> {
         match self.socket.as_mut() {
             Some(socket) => {
-                let id = StandardId::new(CAN_BROADCAST_ID as u16)
-                    .ok_or_else(|| Error::Error(format!("Invalid CAN ID: {}", CAN_BROADCAST_ID)))?;
+                let id = match self.mode {
+                    ComMode::Broadcast => StandardId::new(CAN_BROADCAST_ID as u16),
+                    ComMode::Specific(node_id) => {
+                        StandardId::new(CAN_BASE_ID as u16 + node_id as u16 * 2)
+                    }
+                }
+                .ok_or_else(|| Error::Error("Invalid CAN ID".to_string()))?;
                 let frame = socketcan::frame::CanDataFrame::new(id, &msg.to_raw_data_array())
                     .ok_or_else(|| Error::Error("Failed to create CAN data frame".to_string()))?;
 
