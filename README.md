@@ -2,6 +2,8 @@
 
 A comprehensive Rust-based toolset for updating firmware on embedded devices using the Frankly Bootloader protocol. The project provides both a command-line interface (CLI) and an interactive terminal user interface (TUI) for managing firmware updates over multiple communication interfaces.
 
+This repo was forked to add some additional features, which are needed in order to effectively communicate with the EduArt pcb-stack.  
+
 ## Features
 
 - **Multiple Communication Interfaces**: Serial (UART/USB), CAN bus, and simulated devices
@@ -16,6 +18,7 @@ A comprehensive Rust-based toolset for updating firmware on embedded devices usi
 
 ## Table of Contents
 
+- [EduArt goal definition](#eduart-goal-definition)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [CLI Usage](#cli-usage)
@@ -24,6 +27,63 @@ A comprehensive Rust-based toolset for updating firmware on embedded devices usi
 - [Building from Source](#building-from-source)
 - [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting)
+
+## EduArt goal definition
+
+This tool shall be used to communicate with any board of the pcb-stack, in order to update/erase/upload new firmware to any board without a programming adapter needed. Currently tested is only the cli-tool using can interface, which can serve as a basis for a end-user-friendly fw update tool.
+
+
+### Communication
+
+Every board has a bootloader installed, which responds to the can messages of this toolset. 
+Each bootloader/board has an individual node_id, in order to be addressed individually by this toolset.
+
+
+The Can-Identifiers of all bootloaders are determined as: CAN_BASE_ID + node_id * 2 + 1.
+
+The Can-Identifier of this toolset is: CAN_BROADCAST_ID.
+
+**The Can-Identifier of the boards' firmware does not match the Can-Identifier of the boards' bootloader.** This toolset only communicates with bootloaders, it can flash and start the firmware but does not communicate with it. This is important, so that firmware cannot interfere with the bootloader or this toolset.
+
+
+For Example: 
+
+CAN_BASE_ID = 0x781
+
+CAN_BROADCAST_ID = 0x780
+
+A rpi5-adapter board runs a bootloader with node_id = 1 -> sends CAN-Messages with id 0x784, listens to CAN-Messages sent from 0x780.
+
+An rpi5 running this toolset -> sends CAN-Messages with id 0x780, listens to CAN-Messages sent from 0x780 - 0x78F.
+
+A Power Management might send messages with id 0x508. These messages are ignored both by the bootlader and this toolset.
+
+
+### Bootloader implementation
+
+Currently there are bootloader implementations for the following boards:
+
+- sensor ring
+- rpi5 adapter
+- motor shield
+
+Note that in order to use a bootloader, the firmware for the board must reserve the first 16KB of flash memory for the bootloader and the last byte for the CRC. 
+Compatible firmware versions for the bootloaders exist, please use them. 
+
+
+### Wake up, bootloader!
+
+Every bootloader has a wake up trigger implemented: manually restart the board three times and it will stay in bootloader mode, rather than running the firmware application. 
+
+The compatible firmware versions also react to the wake-up CAN-Message BOOTLOADER_START_CMD. 
+
+
+### Dependencies
+
+Currently, each board's bootloader is managed in it's own repo. Long-term goal is to merge those repos, in order to only maintain one bootloader which can be used by any hardware as a submodule.
+
+Fixed values like the CAN_BROADCAST_ID or the BOOTLOADER_START_CMD are defined in the firmware_library and can be used by any bootloader/firmware implementation. Do not define these elsewhere, the entire pcb-stack needs to follow the same values in order to communicate properly.
+
 
 ## Installation
 
