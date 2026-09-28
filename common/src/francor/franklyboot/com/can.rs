@@ -1,10 +1,11 @@
 use socketcan::{
     CanFilter, CanFrame, CanSocket, EmbeddedFrame, Frame, Socket, SocketOptions, StandardId,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::francor::franklyboot::{
     com::{
+        app_msg::{is_wakeup_ack, wakeup_payload},
         msg::{Msg, RequestType},
         ComConnParams, ComInterface, ComMode,
     },
@@ -36,6 +37,54 @@ pub struct CANInterface {
 
 impl CANInterface {
     // Private functions --------------------------------------------------------------------------
+    pub fn wakeup(&mut self) -> Result<Vec<(u32, Vec<u8>)>, Error> {
+        // send wakeup-message
+        let window = self.timeout;
+        let socket = self
+            .socket
+            .as_mut()
+            .ok_or_else(|| Error::Error("CAN socket not open!".to_string()))?;
+
+        // Unset filter, to receive answeres from firmware applications
+        let filter = CanFilter::new(0, 0);
+        socket
+            .set_filters(&[filter])
+            .map_err(|e| Error::Error(format!("Failed to set filter: {}", e)))?;
+
+        // Send Broadcast, no matter the mode
+        let id = StandardId::new(CAN_BROADCAST_ID as u16)
+            .ok_or_else(|| Error::Error("Invalid CAN ID".to_string()))?;
+
+        let frame = socketcan::frame::CanDataFrame::new(id, &wakeup_payload())
+            .ok_or_else(|| Error::Error("Failed to create CAN data frame".to_string()))?;
+        socket
+            .write_frame(&frame)
+            .map_err(|e| Error::Error(format!("{}", e)))?;
+
+        // wait for ack responses, until timeout is reached
+        let start = Instant::now();
+
+        let mut acks: Vec<(u32, Vec<u8>)> = Vec::new();
+        // listen for acks only for limited time, otherwise cyclic application messages let this loop live forever
+        while start.elapsed() < window {
+            match socket.read_frame() {
+                Ok(CanFrame::Data(frame)) => {
+                    let ack = (frame.raw_id(), frame.data().to_vec());
+                    // Only count non-bootloader acks
+                    if ack.0 <= CAN_BROADCAST_ID || ack.0 <= CAN_MAX_ID {
+                        if is_wakeup_ack(&ack.1) && !acks.contains(&ack) {
+                            acks.push(ack);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break, // timeout, no more answers
+            }
+        }
+
+        self.set_mode(self.mode)?; // restore bootloader filter
+        Ok(acks)
+    }
 
     fn can_frame_to_msg(can_frame: &socketcan::frame::CanDataFrame) -> Msg {
         let data = can_frame.data();
@@ -67,8 +116,6 @@ impl ComInterface for CANInterface {
                 socket
                     .set_read_timeout(Some(self.timeout))
                     .map_err(|_e| Error::Error("Failed to set rx timeout!".to_string()))?;
-
-                // \todo extract filtering into own function, because it is also used in set_mode()
 
                 // Set ID and Mask to receive answers only from bootloader nodes
                 let can_rx_msg_id = CAN_BROADCAST_ID;
