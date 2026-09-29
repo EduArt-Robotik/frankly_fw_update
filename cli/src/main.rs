@@ -813,14 +813,7 @@ where
 pub fn wakeup_devices(conn_params: &ComConnParams) {
     let mut interface = CANInterface::create().unwrap();
     interface.open(conn_params).unwrap();
-
-    let acks = interface.wakeup().expect("Failed to send wake-up message");
-
-    println!("Wake-up sent, {} device(s) acknowledged", acks.len());
-    for (id, data) in acks {
-        let bytes: Vec<String> = data.iter().map(|b| format!("{:02X}", b)).collect();
-        println!("  ACK from CAN id 0x{:03X}, data: {}", id, bytes.join(" "));
-    }
+    interface.wakeup().expect("Failed to send wake-up message");
 }
 
 // ================================================================================================

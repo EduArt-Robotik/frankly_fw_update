@@ -1,11 +1,11 @@
 use socketcan::{
     CanFilter, CanFrame, CanSocket, EmbeddedFrame, Frame, Socket, SocketOptions, StandardId,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::francor::franklyboot::{
     com::{
-        app_msg::{is_wakeup_ack, wakeup_payload},
+        app_msg::wakeup_payload,
         msg::{Msg, RequestType},
         ComConnParams, ComInterface, ComMode,
     },
@@ -37,9 +37,8 @@ pub struct CANInterface {
 
 impl CANInterface {
     // Private functions --------------------------------------------------------------------------
-    pub fn wakeup(&mut self) -> Result<Vec<(u32, Vec<u8>)>, Error> {
+    pub fn wakeup(&mut self) -> Result<(), Error> {
         // send wakeup-message
-        let window = self.timeout;
         let socket = self
             .socket
             .as_mut()
@@ -61,29 +60,8 @@ impl CANInterface {
             .write_frame(&frame)
             .map_err(|e| Error::Error(format!("{}", e)))?;
 
-        // wait for ack responses, until timeout is reached
-        let start = Instant::now();
-
-        let mut acks: Vec<(u32, Vec<u8>)> = Vec::new();
-        // listen for acks only for limited time, otherwise cyclic application messages let this loop live forever
-        while start.elapsed() < window {
-            match socket.read_frame() {
-                Ok(CanFrame::Data(frame)) => {
-                    let ack = (frame.raw_id(), frame.data().to_vec());
-                    // Only count non-bootloader acks
-                    if ack.0 <= CAN_BROADCAST_ID || ack.0 <= CAN_MAX_ID {
-                        if is_wakeup_ack(&ack.1) && !acks.contains(&ack) {
-                            acks.push(ack);
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => break, // timeout, no more answers
-            }
-        }
-
         self.set_mode(self.mode)?; // restore bootloader filter
-        Ok(acks)
+        Ok(())
     }
 
     fn can_frame_to_msg(can_frame: &socketcan::frame::CanDataFrame) -> Msg {
