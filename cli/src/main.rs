@@ -137,6 +137,7 @@ impl InterfaceType {
 /// - **erase**: Erase application flash section on target device
 /// - **flash**: Flash Intel HEX firmware to target device (requires `--hex-file`)
 /// - **reset**: Reset target device
+/// - **wakeup** : Send wakeup signal to devices (for CAN networks only)
 ///
 /// # Common Arguments
 ///
@@ -230,6 +231,13 @@ fn main() {
                 .arg(interface_arg.clone())
                 .arg(node_arg.clone()),
         )
+        .subcommand(
+            Command::new("wakeup")
+                .long_flag("wakeup")
+                .about("[Application Message] Sends wakeup to trigger bootloader mode")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone()),
+        )
         .get_matches();
 
     println!("Frankly Firmware Update CLI (c) 2023 Martin Bauernschmitt - FRANCOR e.V.");
@@ -321,6 +329,18 @@ fn main() {
                 InterfaceType::Sim => {
                     reset_device::<SIMInterface>(&ComConnParams::for_sim_device(), node_id)
                 }
+            }
+        }
+        Some(("wakeup", wakeup_matches)) => {
+            let interface_type_str = wakeup_matches.get_one::<String>("type").unwrap();
+            let interface_type = InterfaceType::from_str(interface_type_str).unwrap();
+            let interface_name = wakeup_matches.get_one::<String>("interface").unwrap();
+
+            match interface_type {
+                InterfaceType::Serial => println!("Serial not supported yet"),
+                InterfaceType::CAN => wakeup_devices(&ComConnParams::for_can_conn(interface_name)),
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet"),
             }
         }
         _ => {
@@ -768,6 +788,32 @@ where
     // Parse Intel HEX file into firmware data structure
     let hex_file = HexFile::from_file(hex_file_path).unwrap();
     device.flash(&hex_file).unwrap();
+}
+
+/// Sends a single CAN broadcast "wake-up" message to running applications, in order to trigger a restart bootloader mode.
+///
+/// This is intentionally minimal: it does **not** run the usual `connect_device` handshake
+/// (no device info read-out, no node targeting). It just opens the raw CAN interface and
+/// transmits one broadcast frame, then counts the amount of targets that responded to the wake-up request.
+///
+/// # Arguments
+///
+/// * `conn_params` - Connection parameters for the CAN interface (interface name, e.g. `can0`)
+///
+/// # Panics
+///
+/// This function uses `.unwrap()` and will panic if the CAN interface cannot be opened or the
+/// frame cannot be sent.
+///
+/// # Examples
+///
+/// ```ignore
+/// wakeup_devices(&ComConnParams::for_can_conn("can0"));
+/// ```
+pub fn wakeup_devices(conn_params: &ComConnParams) {
+    let mut interface = CANInterface::create().unwrap();
+    interface.open(conn_params).unwrap();
+    interface.wakeup().expect("Failed to send wake-up message");
 }
 
 // ================================================================================================
