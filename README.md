@@ -263,6 +263,22 @@ Reset the device and start the application:
 cargo run -p frankly-fw-update-cli -- reset --type can --interface can0 --node 1
 ```
 
+#### Restart Application
+
+Start the application:
+
+```bash
+cargo run -p frankly-fw-update-cli -- restart --type can --interface can0 --node 1
+```
+
+#### Wakeup Bootloader
+
+Broadcast wakeup-call: (compatible firmware will then switch to bootloader mode)
+
+```bash
+cargo run -p frankly-fw-update-cli -- wakeup --type can --interface can0 
+```
+
 ### CLI Options
 
 | Option | Description | Required | Default |
@@ -284,9 +300,6 @@ cargo run -p frankly-fw-update-cli -- erase --type can --interface can0 --node 1
 
 # 3. Flash new firmware
 cargo run -p frankly-fw-update-cli -- flash --type can --interface can0 --node 1 --hex-file new_firmware.hex
-
-# 4. Reset device (automatically done after flash, but can be done manually)
-cargo run -p frankly-fw-update-cli -- reset --type can --interface can0 --node 1
 ```
 
 **Serial Interface Example**:

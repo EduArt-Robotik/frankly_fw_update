@@ -153,6 +153,20 @@ where
         Ok(())
     }
 
+    /// Restart the firmware of the device
+    ///
+    /// This function restarts the firmware of the device.
+    ///
+    pub fn start_app(&mut self) -> Result<(), Error> {
+        self.entries
+            .get_entry_mut(RequestType::StartApp)
+            .exec(&mut self.interface, 0)?;
+
+        self.progress(ProgressUpdate::Message("Starting application...".to_string()));
+
+        Ok(())
+    }
+
     /// Erase the application area
     ///
     /// This function erases the application area of the device.
