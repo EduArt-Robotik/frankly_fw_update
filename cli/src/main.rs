@@ -14,6 +14,8 @@
 //! - **erase**: Erase the application section of a device's flash memory
 //! - **flash**: Flash new firmware (Intel HEX format) to a device
 //! - **reset**: Reset a device (restart)
+//! - **restart**: Restart the firmware of a device (CAN only)
+//! - **wakeup**: Send a wakeup signal to devices (CAN only)
 //!
 //! ## Communication Interfaces
 //!
@@ -232,6 +234,14 @@ fn main() {
                 .arg(node_arg.clone()),
         )
         .subcommand(
+            Command::new("restart")
+                .long_flag("restart")
+                .about("Restart Firmware")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone())
+                .arg(node_arg.clone()),
+        )
+        .subcommand(
             Command::new("wakeup")
                 .long_flag("wakeup")
                 .about("[Application Message] Sends wakeup to trigger bootloader mode")
@@ -329,6 +339,22 @@ fn main() {
                 InterfaceType::Sim => {
                     reset_device::<SIMInterface>(&ComConnParams::for_sim_device(), node_id)
                 }
+            }
+        }
+        Some(("restart", restart_matches)) => {
+            let interface_type_str = restart_matches.get_one::<String>("type").unwrap();
+            let interface_type = InterfaceType::from_str(interface_type_str).unwrap();
+            let interface_name = restart_matches.get_one::<String>("interface").unwrap();
+            let node_id = restart_matches.get_one::<u8>("node").copied();
+
+            match interface_type {
+                InterfaceType::Serial => println!("Serial not supported yet"),
+                InterfaceType::CAN => restart_firmware::<CANInterface>(
+                    &ComConnParams::for_can_conn(interface_name),
+                    node_id,
+                ),
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet")
             }
         }
         Some(("wakeup", wakeup_matches)) => {
@@ -555,6 +581,58 @@ where
     let mut device = connect_device::<I>(conn_params, node_id, progress_fn).unwrap();
     println!("Device: {}", device);
     device.reset().unwrap();
+}
+/// Restarts the firmware of a connected device.
+///
+/// Sends a startApp command to the target device, causing it to restart. This will jump right into the application firmware. 
+/// # Type Parameters
+///
+/// * `I` - Communication interface type implementing `ComInterface`
+///
+/// # Arguments
+///
+/// * `conn_params` - Connection parameters for the interface
+/// * `node_id` - Node ID for network interfaces (required for CAN, ignored for serial)
+///
+/// # Behavior
+///
+/// 1. Validates that node_id is provided for network interfaces
+/// 2. Connects to the device
+/// 3. Displays device information
+/// 4. Sends reset command
+/// 5. Prints status messages via progress callback
+///
+/// # Panics
+///
+/// This function uses `.unwrap()` and will panic if:
+/// - Device connection fails
+///
+/// # Examples
+///
+/// Restart device on CAN network:
+/// ```ignore
+/// restart_firmware::<CANInterface>(&ComConnParams::for_can_conn("can0"), Some(1));
+/// ```
+pub fn restart_firmware<I>(conn_params: &ComConnParams, node_id: Option<u8>)
+where
+    I: ComInterface,
+{
+    if I::is_network() && node_id.is_none() {
+        println!(
+            "Node ID required for multi device network interface! Specify with --node <node-id>"
+        );
+        return;
+    }
+
+    let progress_fn = Some(Box::new(|update: ProgressUpdate| {
+        if let ProgressUpdate::Message(msg) = update {
+            println!("{}", msg)
+        }
+    }) as Box<dyn Fn(ProgressUpdate) + Send>);
+
+    let mut device = connect_device::<I>(conn_params, node_id, progress_fn).unwrap();
+    println!("Device: {}", device);
+    device.start_app().unwrap();
 }
 
 /// Erases the application section of a device's flash memory.
