@@ -1,11 +1,11 @@
 use socketcan::{
     CanFilter, CanFrame, CanSocket, EmbeddedFrame, Frame, Socket, SocketOptions, StandardId,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::francor::franklyboot::{
     com::{
-        app_msg::wakeup_payload,
+        app_msg::APP_MSG_LEN,
         msg::{Msg, RequestType},
         ComConnParams, ComInterface, ComMode,
     },
@@ -37,31 +37,67 @@ pub struct CANInterface {
 
 impl CANInterface {
     // Private functions --------------------------------------------------------------------------
-    pub fn wakeup(&mut self) -> Result<(), Error> {
-        // send wakeup-message
-        let socket = self
-            .socket
-            .as_mut()
-            .ok_or_else(|| Error::Error("CAN socket not open!".to_string()))?;
+    pub fn application_message(
+        &mut self,
+        request: &[u8; APP_MSG_LEN],
+        response_type: Option<u16>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let timeout = self.timeout;
+        let response_id = response_type.map(u16::to_be_bytes);
+        let query_result = (|| {
+            let socket = self
+                .socket
+                .as_mut()
+                .ok_or_else(|| Error::Error("CAN socket not open!".to_string()))?;
+            socket
+                .set_filters(&[CanFilter::new(0, 0)])
+                .map_err(|e| Error::Error(format!("Failed to set filter: {}", e)))?;
 
-        // Unset filter, to receive answeres from firmware applications
-        let filter = CanFilter::new(0, 0);
-        socket
-            .set_filters(&[filter])
-            .map_err(|e| Error::Error(format!("Failed to set filter: {}", e)))?;
+            let id = StandardId::new(CAN_BROADCAST_ID as u16)
+                .ok_or_else(|| Error::Error("Invalid CAN ID".to_string()))?;
+            let frame = socketcan::frame::CanDataFrame::new(id, request)
+                .ok_or_else(|| Error::Error("Failed to create CAN data frame".to_string()))?;
+            socket
+                .write_frame(&frame)
+                .map_err(|e| Error::Error(format!("{}", e)))?;
 
-        // Send Broadcast, no matter the mode
-        let id = StandardId::new(CAN_BROADCAST_ID as u16)
-            .ok_or_else(|| Error::Error("Invalid CAN ID".to_string()))?;
+            let mut responses = Vec::new();
+            if let Some(response_id) = response_id {
+                let deadline = Instant::now() + timeout;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    socket
+                        .set_read_timeout(Some(remaining))
+                        .map_err(|e| Error::Error(format!("Failed to set rx timeout: {}", e)))?;
 
-        let frame = socketcan::frame::CanDataFrame::new(id, &wakeup_payload())
-            .ok_or_else(|| Error::Error("Failed to create CAN data frame".to_string()))?;
-        socket
-            .write_frame(&frame)
-            .map_err(|e| Error::Error(format!("{}", e)))?;
+                    let frame = match socket.read_frame() {
+                        Ok(frame) => frame,
+                        Err(_) => break,
+                    };
+                    if let CanFrame::Data(can_frame) = frame {
+                        let data = can_frame.data();
+                        if data.len() == APP_MSG_LEN && data[0..2] == response_id {
+                            responses.push(data.to_vec());
+                        }
+                    }
+                }
+            }
+            Ok(responses)
+        })();
 
-        self.set_mode(self.mode)?; // restore bootloader filter
-        Ok(())
+        let timeout_restore_result = self.set_timeout(timeout);
+        let restore_result = self.set_mode(self.mode);
+        match (query_result, timeout_restore_result, restore_result) {
+            (Ok(responses), Ok(()), Ok(())) if response_type.is_some() && responses.is_empty() => {
+                Err(Error::ComNoResponse)
+            }
+            (Ok(responses), Ok(()), Ok(())) => Ok(responses),
+            (Err(error), _, _) => Err(error),
+            (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
+        }
     }
 
     fn can_frame_to_msg(can_frame: &socketcan::frame::CanDataFrame) -> Msg {

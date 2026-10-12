@@ -43,8 +43,14 @@
 use clap::{Arg, ArgAction, Command};
 use frankly_fw_update_common::francor::franklyboot::{
     com::{
-        can::CANInterface, serial::SerialInterface, sim::SIMInterface, ComConnParams, ComInterface,
-        ComMode,
+        app_msg::{
+            process_response, AppMsg, FIRMWARE_VERSION_REQ, FIRMWARE_VERSION_RES, PRODUCT_ID_REQ,
+            PRODUCT_ID_RES, WAKEUP_REQ,
+        },
+        can::CANInterface,
+        serial::SerialInterface,
+        sim::SIMInterface,
+        ComConnParams, ComInterface, ComMode,
     },
     device::Device,
     firmware::hex_file::HexFile,
@@ -139,7 +145,12 @@ impl InterfaceType {
 /// - **erase**: Erase application flash section on target device
 /// - **flash**: Flash Intel HEX firmware to target device (requires `--hex-file`)
 /// - **reset**: Reset target device
-/// - **wakeup** : Send wakeup signal to devices (for CAN networks only)
+/// - **restart**: Restart firmware on target device (CAN only)
+///
+/// # Application Message Commands (CAN only)
+/// - **wakeup** : Send wakeup signal to devices
+/// - **firmware** : Read firmware versions
+/// - **product** : Read product IDs
 ///
 /// # Common Arguments
 ///
@@ -244,7 +255,19 @@ fn main() {
         .subcommand(
             Command::new("wakeup")
                 .long_flag("wakeup")
-                .about("[Application Message] Sends wakeup to trigger bootloader mode")
+                .about("[Application Message] Trigger bootloader mode")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone()),
+        )
+        .subcommand(
+            Command::new("firmware")
+                .about("[Application Message] Read firmware versions")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone()),
+        )
+        .subcommand(
+            Command::new("product")
+                .about("[Application Message] Read product IDs")
                 .arg(type_arg.clone())
                 .arg(interface_arg.clone()),
         )
@@ -354,7 +377,7 @@ fn main() {
                     node_id,
                 ),
                 InterfaceType::Ethernet => println!("Ethernet not supported yet"),
-                InterfaceType::Sim => println!("Sim not supported yet")
+                InterfaceType::Sim => println!("Sim not supported yet"),
             }
         }
         Some(("wakeup", wakeup_matches)) => {
@@ -364,7 +387,77 @@ fn main() {
 
             match interface_type {
                 InterfaceType::Serial => println!("Serial not supported yet"),
-                InterfaceType::CAN => wakeup_devices(&ComConnParams::for_can_conn(interface_name)),
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        WAKEUP_REQ,
+                        None,
+                    ) {
+                        Ok(_) => println!("Wake-up message sent."),
+                        Err(error) => println!("Failed to send wake-up message: {}", error),
+                    }
+                }
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet"),
+            }
+        }
+        Some(("firmware", firmware_matches)) => {
+            let interface_type =
+                InterfaceType::from_str(firmware_matches.get_one::<String>("type").unwrap())
+                    .unwrap();
+            let interface_name = firmware_matches.get_one::<String>("interface").unwrap();
+
+            match interface_type {
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        FIRMWARE_VERSION_REQ,
+                        Some(FIRMWARE_VERSION_RES),
+                    ) {
+                        Ok(boards) => {
+                            if boards.is_empty() {
+                                println!("No device responded.");
+                            }
+                            for [node, major, minor, patch, _] in boards {
+                                println!("Device found[ {node}]: firmware version {major}.{minor}.{patch}");
+                            }
+                        }
+                        Err(error) => println!("Failed to query firmware versions: {}", error),
+                    }
+                }
+                InterfaceType::Serial => println!("Serial not supported yet"),
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet"),
+            }
+        }
+        Some(("product", product_matches)) => {
+            let interface_type =
+                InterfaceType::from_str(product_matches.get_one::<String>("type").unwrap())
+                    .unwrap();
+            let interface_name = product_matches.get_one::<String>("interface").unwrap();
+
+            match interface_type {
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        PRODUCT_ID_REQ,
+                        Some(PRODUCT_ID_RES),
+                    ) {
+                        Ok(boards) => {
+                            if boards.is_empty() {
+                                println!("No devices responded.");
+                            }
+                            for [node, family, identifier, feature_high, feature_low] in boards {
+                                println!(
+                                    "Device found[ {node} ]: product id {family}.{identifier}.{}",
+                                    u16::from_be_bytes([feature_high, feature_low])
+                                );
+                            }
+                        }
+                        Err(error) => println!("Failed to query product IDs: {}", error),
+                    }
+                }
+                InterfaceType::Serial => println!("Serial not supported yet"),
                 InterfaceType::Ethernet => println!("Ethernet not supported yet"),
                 InterfaceType::Sim => println!("Sim not supported yet"),
             }
@@ -584,7 +677,7 @@ where
 }
 /// Restarts the firmware of a connected device.
 ///
-/// Sends a startApp command to the target device, causing it to restart. This will jump right into the application firmware. 
+/// Sends a startApp command to the target device, causing it to restart. This will jump right into the application firmware.
 /// # Type Parameters
 ///
 /// * `I` - Communication interface type implementing `ComInterface`
@@ -868,30 +961,31 @@ where
     device.flash(&hex_file).unwrap();
 }
 
-/// Sends a single CAN broadcast "wake-up" message to running applications, in order to trigger a restart bootloader mode.
-///
-/// This is intentionally minimal: it does **not** run the usual `connect_device` handshake
-/// (no device info read-out, no node targeting). It just opens the raw CAN interface and
-/// transmits one broadcast frame, then counts the amount of targets that responded to the wake-up request.
+/// Sends a broadcast application message and optionally waits for responses.
 ///
 /// # Arguments
 ///
-/// * `conn_params` - Connection parameters for the CAN interface (interface name, e.g. `can0`)
+/// * `conn_params` - Connection parameters for the interface
+/// * `request_type` - Request type for the application message
+/// * `response_type` - Response type for the application message
 ///
-/// # Panics
-///
-/// This function uses `.unwrap()` and will panic if the CAN interface cannot be opened or the
-/// frame cannot be sent.
-///
-/// # Examples
-///
-/// ```ignore
-/// wakeup_devices(&ComConnParams::for_can_conn("can0"));
-/// ```
-pub fn wakeup_devices(conn_params: &ComConnParams) {
-    let mut interface = CANInterface::create().unwrap();
-    interface.open(conn_params).unwrap();
-    interface.wakeup().expect("Failed to send wake-up message");
+fn application_message(
+    conn_params: &ComConnParams,
+    request_type: u16,
+    response_type: Option<u16>,
+) -> Result<Vec<[u8; 5]>, Error> {
+    let mut interface = CANInterface::create()?;
+    interface.open(conn_params)?;
+
+    let request = AppMsg::request(request_type).to_raw_data_array();
+    let responses = interface.application_message(&request, response_type)?;
+    match response_type {
+        Some(response_type) => responses
+            .iter()
+            .map(|response| process_response(response, response_type))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
 }
 
 // ================================================================================================
