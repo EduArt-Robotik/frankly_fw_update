@@ -200,6 +200,11 @@ fn main() {
         .action(ArgAction::Set)
         .num_args(1);
 
+    let json_arg = Arg::new("json")
+        .long("json")
+        .help("Emit machine-readable JSON output")
+        .action(ArgAction::SetTrue);
+
     let matches = Command::new("frankly-fw-update")
         .version("0.2.0")
         .author("Martin Bauernschmitt - FRANCOR e.V.")
@@ -210,7 +215,8 @@ fn main() {
                 .long_flag("search")
                 .about("Search for connected devices on specified network")
                 .arg(type_arg.clone())
-                .arg(interface_arg.clone()),
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
         )
         .subcommand(
             Command::new("erase")
@@ -263,30 +269,54 @@ fn main() {
             Command::new("firmware")
                 .about("[Application Message] Read firmware versions")
                 .arg(type_arg.clone())
-                .arg(interface_arg.clone()),
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
         )
         .subcommand(
             Command::new("product")
                 .about("[Application Message] Read product IDs")
                 .arg(type_arg.clone())
-                .arg(interface_arg.clone()),
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
         )
         .get_matches();
 
-    println!("Frankly Firmware Update CLI (c) 2023 Martin Bauernschmitt - FRANCOR e.V.");
+    let machine_readable = is_machine_readable(&matches);
+    if !machine_readable {
+        println!("Frankly Firmware Update CLI (c) 2023 Martin Bauernschmitt - FRANCOR e.V.");
+    }
 
     match matches.subcommand() {
         Some(("search", search_matches)) => {
             let interface_type_str = search_matches.get_one::<String>("type").unwrap();
             let interface_type = InterfaceType::from_str(interface_type_str).unwrap();
             let interface_name = search_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = search_matches.get_flag("json");
 
             match interface_type {
-                InterfaceType::Serial => search_for_devices::<SerialInterface>(
-                    &ComConnParams::for_serial_conn(interface_name, 115200),
-                ),
+                InterfaceType::Serial => {
+                    if machine_readable {
+                        eprintln!("JSON search output is currently supported for CAN only");
+                        std::process::exit(2);
+                    }
+                    search_for_devices::<SerialInterface>(&ComConnParams::for_serial_conn(
+                        interface_name,
+                        115200,
+                    ))
+                }
                 InterfaceType::CAN => {
-                    search_for_devices::<CANInterface>(&ComConnParams::for_can_conn(interface_name))
+                    let conn_params = ComConnParams::for_can_conn(interface_name);
+                    if machine_readable {
+                        match scan_nodes::<CANInterface>(&conn_params) {
+                            Ok(nodes) => println!("{{\"nodes\":{:?}}}", nodes),
+                            Err(error) => {
+                                eprintln!("Failed to search CAN network: {}", error);
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        search_for_devices::<CANInterface>(&conn_params)
+                    }
                 }
                 InterfaceType::Ethernet => {
                     println!("Ethernet not supported yet");
@@ -394,7 +424,10 @@ fn main() {
                         None,
                     ) {
                         Ok(_) => println!("Wake-up message sent."),
-                        Err(error) => println!("Failed to send wake-up message: {}", error),
+                        Err(error) => {
+                            eprintln!("Failed to send wake-up message: {}", error);
+                            std::process::exit(1);
+                        }
                     }
                 }
                 InterfaceType::Ethernet => println!("Ethernet not supported yet"),
@@ -406,6 +439,7 @@ fn main() {
                 InterfaceType::from_str(firmware_matches.get_one::<String>("type").unwrap())
                     .unwrap();
             let interface_name = firmware_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = firmware_matches.get_flag("json");
 
             match interface_type {
                 InterfaceType::CAN => {
@@ -415,6 +449,17 @@ fn main() {
                         Some(FIRMWARE_VERSION_RES),
                     ) {
                         Ok(boards) => {
+                            if machine_readable {
+                                let devices = boards
+                                    .iter()
+                                    .map(|[node, major, minor, patch, _]| {
+                                        format!("{{\"node\":{node},\"version\":[{major},{minor},{patch}]}}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                println!("{{\"devices\":[{devices}]}}");
+                                return;
+                            }
                             if boards.is_empty() {
                                 println!("No device responded.");
                             }
@@ -422,7 +467,14 @@ fn main() {
                                 println!("Device found[ {node}]: firmware version {major}.{minor}.{patch}");
                             }
                         }
-                        Err(error) => println!("Failed to query firmware versions: {}", error),
+                        Err(error) => {
+                            if machine_readable {
+                                eprintln!("Failed to query firmware versions: {}", error);
+                            } else {
+                                println!("Failed to query firmware versions: {}", error);
+                            }
+                            std::process::exit(1);
+                        }
                     }
                 }
                 InterfaceType::Serial => println!("Serial not supported yet"),
@@ -435,6 +487,7 @@ fn main() {
                 InterfaceType::from_str(product_matches.get_one::<String>("type").unwrap())
                     .unwrap();
             let interface_name = product_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = product_matches.get_flag("json");
 
             match interface_type {
                 InterfaceType::CAN => {
@@ -444,6 +497,18 @@ fn main() {
                         Some(PRODUCT_ID_RES),
                     ) {
                         Ok(boards) => {
+                            if machine_readable {
+                                let devices = boards
+                                    .iter()
+                                    .map(|[node, family, identifier, feature_high, feature_low]| {
+                                        let feature = u16::from_be_bytes([*feature_high, *feature_low]);
+                                        format!("{{\"node\":{node},\"product_id\":[{family},{identifier},{feature}]}}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                println!("{{\"devices\":[{devices}]}}");
+                                return;
+                            }
                             if boards.is_empty() {
                                 println!("No devices responded.");
                             }
@@ -454,7 +519,14 @@ fn main() {
                                 );
                             }
                         }
-                        Err(error) => println!("Failed to query product IDs: {}", error),
+                        Err(error) => {
+                            if machine_readable {
+                                eprintln!("Failed to query product IDs: {}", error);
+                            } else {
+                                println!("Failed to query product IDs: {}", error);
+                            }
+                            std::process::exit(1);
+                        }
                     }
                 }
                 InterfaceType::Serial => println!("Serial not supported yet"),
@@ -465,6 +537,15 @@ fn main() {
         _ => {
             println!("Unknown command");
         }
+    }
+}
+
+fn is_machine_readable(matches: &clap::ArgMatches) -> bool {
+    match matches.subcommand() {
+        Some(("search", sub_matches))
+        | Some(("firmware", sub_matches))
+        | Some(("product", sub_matches)) => sub_matches.get_flag("json"),
+        _ => false,
     }
 }
 
@@ -598,13 +679,7 @@ where
     I: ComInterface,
 {
     if I::is_network() {
-        let node_lst = {
-            let mut interface = I::create().unwrap();
-            interface.open(conn_params).unwrap();
-            interface.scan_network().unwrap()
-        };
-
-        for node in node_lst {
+        for node in scan_nodes::<I>(conn_params).unwrap() {
             let device = connect_device::<I>(conn_params, Some(node), None).unwrap();
             println!("Device found[{:3}]: {}", node, device);
         }
@@ -612,6 +687,15 @@ where
         let device = connect_device::<I>(conn_params, None, None).unwrap();
         println!("Device found: {}", device);
     }
+}
+
+fn scan_nodes<I>(conn_params: &ComConnParams) -> Result<Vec<u8>, Error>
+where
+    I: ComInterface,
+{
+    let mut interface = I::create()?;
+    interface.open(conn_params)?;
+    interface.scan_network()
 }
 
 /// Resets (restarts) a connected device.

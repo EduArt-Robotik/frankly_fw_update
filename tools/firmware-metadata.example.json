@@ -1,0 +1,16 @@
+{
+  "boards": [
+    {
+      "type": "rpi5_adapter",
+      "product_id": [3, 1, 0]
+    },
+    {
+      "type": "power_management",
+      "product_id": [2, 1, 0]
+    },
+    {
+      "type": "motorshield",
+      "product_id": [1, 1, 1]
+    }
+  ]
+}
