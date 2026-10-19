@@ -761,7 +761,7 @@ where
 }
 /// Restarts the firmware of a connected device.
 ///
-/// Sends a startApp command to the target device, causing it to restart. This will jump right into the application firmware.
+/// Sends a startApp command to the target device, causing it to restart. This will jump right into the application firmware. 
 /// # Type Parameters
 ///
 /// * `I` - Communication interface type implementing `ComInterface`
