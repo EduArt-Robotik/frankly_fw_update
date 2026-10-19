@@ -185,6 +185,30 @@ The CLI follows a standard command structure:
 frankly-fw-update-cli <COMMAND> --type <INTERFACE_TYPE> --interface <INTERFACE_NAME> [OPTIONS]
 ```
 
+### Automatic Update
+
+To update a stack of multiple boards, use `tools/update_stack.py`:
+
+Zip the required firmware_board_type_0.0.0.hex and `metadata.json` in the ZIP archive. The archive must contain exactly one `.hex` file for each board type present in the discovered stack. Each firmware filename must include its board type and exactly one firmware version in `X.Y.Z` format, for example `firmware_rpi5_adapter.1.2.3.hex`. Subdirectories inside the ZIP archive are supported. See [tools/firmware-metadata.example.json](tools/firmware-metadata.example.json) for the metadata format; replace its sample product IDs with the values reported by the `product` command for your hardware. The script needs this information to correctly flash firmware to board.
+
+
+```bash
+python3 tools/update_stack.py update.zip --interface CAN2 
+```
+
+The script first queries product IDs and installed firmware versions. The ZIP firmware must be newer than `0.3.0` (firmware must support bootloader) and newer than the version currently installed on each board. After confirmation, the script sends `wakeup`, waits 3 seconds, and searches up to 5 times at 1-second intervals for the expected bootloader nodes. It erases and flashes only after all expected nodes are found. Tune this behavior with `--bootloader-wait`, `--bootloader-search-attempts`, and `--bootloader-search-interval`. Add `--yes` for unattended operation. The default `--interface` is `CAN2`; use `--cli` to specify the path to the CLI binary.
+
+Dry-run still queries devices over CAN but does not send a wake-up or flash firmware. The script stops before flashing if a mapping is ambiguous, firmware is missing, or the discovered node list differs from the product query.
+
+For scripts, `product`, `firmware`, and CAN `search` support an optional `--json` flag. 
+
+```bash
+frankly-fw-update-cli product --type can --interface CAN2 --json
+frankly-fw-update-cli firmware --type can --interface CAN2 --json
+```
+
+The JSON output contains `node` and `product_id` for product queries, `node` and `version` for firmware queries, and a `nodes` list for searches.
+
 ### Commands
 
 #### Search for Devices

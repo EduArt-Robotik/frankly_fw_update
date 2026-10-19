@@ -43,8 +43,14 @@
 use clap::{Arg, ArgAction, Command};
 use frankly_fw_update_common::francor::franklyboot::{
     com::{
-        can::CANInterface, serial::SerialInterface, sim::SIMInterface, ComConnParams, ComInterface,
-        ComMode,
+        app_msg::{
+            process_response, AppMsg, FIRMWARE_VERSION_REQ, FIRMWARE_VERSION_RES, PRODUCT_ID_REQ,
+            PRODUCT_ID_RES, WAKEUP_REQ,
+        },
+        can::CANInterface,
+        serial::SerialInterface,
+        sim::SIMInterface,
+        ComConnParams, ComInterface, ComMode,
     },
     device::Device,
     firmware::hex_file::HexFile,
@@ -139,7 +145,12 @@ impl InterfaceType {
 /// - **erase**: Erase application flash section on target device
 /// - **flash**: Flash Intel HEX firmware to target device (requires `--hex-file`)
 /// - **reset**: Reset target device
-/// - **wakeup** : Send wakeup signal to devices (for CAN networks only)
+/// - **restart**: Restart firmware on target device (CAN only)
+///
+/// # Application Message Commands (CAN only)
+/// - **wakeup** : Send wakeup signal to devices
+/// - **firmware** : Read firmware versions
+/// - **product** : Read product IDs
 ///
 /// # Common Arguments
 ///
@@ -189,6 +200,11 @@ fn main() {
         .action(ArgAction::Set)
         .num_args(1);
 
+    let json_arg = Arg::new("json")
+        .long("json")
+        .help("Emit machine-readable JSON output")
+        .action(ArgAction::SetTrue);
+
     let matches = Command::new("frankly-fw-update")
         .version("0.2.0")
         .author("Martin Bauernschmitt - FRANCOR e.V.")
@@ -199,7 +215,8 @@ fn main() {
                 .long_flag("search")
                 .about("Search for connected devices on specified network")
                 .arg(type_arg.clone())
-                .arg(interface_arg.clone()),
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
         )
         .subcommand(
             Command::new("erase")
@@ -244,26 +261,62 @@ fn main() {
         .subcommand(
             Command::new("wakeup")
                 .long_flag("wakeup")
-                .about("[Application Message] Sends wakeup to trigger bootloader mode")
+                .about("[Application Message] Trigger bootloader mode")
                 .arg(type_arg.clone())
                 .arg(interface_arg.clone()),
         )
+        .subcommand(
+            Command::new("firmware")
+                .about("[Application Message] Read firmware versions")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
+        )
+        .subcommand(
+            Command::new("product")
+                .about("[Application Message] Read product IDs")
+                .arg(type_arg.clone())
+                .arg(interface_arg.clone())
+                .arg(json_arg.clone()),
+        )
         .get_matches();
 
-    println!("Frankly Firmware Update CLI (c) 2023 Martin Bauernschmitt - FRANCOR e.V.");
+    let machine_readable = is_machine_readable(&matches);
+    if !machine_readable {
+        println!("Frankly Firmware Update CLI (c) 2023 Martin Bauernschmitt - FRANCOR e.V.");
+    }
 
     match matches.subcommand() {
         Some(("search", search_matches)) => {
             let interface_type_str = search_matches.get_one::<String>("type").unwrap();
             let interface_type = InterfaceType::from_str(interface_type_str).unwrap();
             let interface_name = search_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = search_matches.get_flag("json");
 
             match interface_type {
-                InterfaceType::Serial => search_for_devices::<SerialInterface>(
-                    &ComConnParams::for_serial_conn(interface_name, 115200),
-                ),
+                InterfaceType::Serial => {
+                    if machine_readable {
+                        eprintln!("JSON search output is currently supported for CAN only");
+                        std::process::exit(2);
+                    }
+                    search_for_devices::<SerialInterface>(&ComConnParams::for_serial_conn(
+                        interface_name,
+                        115200,
+                    ))
+                }
                 InterfaceType::CAN => {
-                    search_for_devices::<CANInterface>(&ComConnParams::for_can_conn(interface_name))
+                    let conn_params = ComConnParams::for_can_conn(interface_name);
+                    if machine_readable {
+                        match scan_nodes::<CANInterface>(&conn_params) {
+                            Ok(nodes) => println!("{{\"nodes\":{:?}}}", nodes),
+                            Err(error) => {
+                                eprintln!("Failed to search CAN network: {}", error);
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        search_for_devices::<CANInterface>(&conn_params)
+                    }
                 }
                 InterfaceType::Ethernet => {
                     println!("Ethernet not supported yet");
@@ -354,7 +407,7 @@ fn main() {
                     node_id,
                 ),
                 InterfaceType::Ethernet => println!("Ethernet not supported yet"),
-                InterfaceType::Sim => println!("Sim not supported yet")
+                InterfaceType::Sim => println!("Sim not supported yet"),
             }
         }
         Some(("wakeup", wakeup_matches)) => {
@@ -364,7 +417,119 @@ fn main() {
 
             match interface_type {
                 InterfaceType::Serial => println!("Serial not supported yet"),
-                InterfaceType::CAN => wakeup_devices(&ComConnParams::for_can_conn(interface_name)),
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        WAKEUP_REQ,
+                        None,
+                    ) {
+                        Ok(_) => println!("Wake-up message sent."),
+                        Err(error) => {
+                            eprintln!("Failed to send wake-up message: {}", error);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet"),
+            }
+        }
+        Some(("firmware", firmware_matches)) => {
+            let interface_type =
+                InterfaceType::from_str(firmware_matches.get_one::<String>("type").unwrap())
+                    .unwrap();
+            let interface_name = firmware_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = firmware_matches.get_flag("json");
+
+            match interface_type {
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        FIRMWARE_VERSION_REQ,
+                        Some(FIRMWARE_VERSION_RES),
+                    ) {
+                        Ok(boards) => {
+                            if machine_readable {
+                                let devices = boards
+                                    .iter()
+                                    .map(|[node, major, minor, patch, _]| {
+                                        format!("{{\"node\":{node},\"version\":[{major},{minor},{patch}]}}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                println!("{{\"devices\":[{devices}]}}");
+                                return;
+                            }
+                            if boards.is_empty() {
+                                println!("No device responded.");
+                            }
+                            for [node, major, minor, patch, _] in boards {
+                                println!("Device found[ {node}]: firmware version {major}.{minor}.{patch}");
+                            }
+                        }
+                        Err(error) => {
+                            if machine_readable {
+                                eprintln!("Failed to query firmware versions: {}", error);
+                            } else {
+                                println!("Failed to query firmware versions: {}", error);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                InterfaceType::Serial => println!("Serial not supported yet"),
+                InterfaceType::Ethernet => println!("Ethernet not supported yet"),
+                InterfaceType::Sim => println!("Sim not supported yet"),
+            }
+        }
+        Some(("product", product_matches)) => {
+            let interface_type =
+                InterfaceType::from_str(product_matches.get_one::<String>("type").unwrap())
+                    .unwrap();
+            let interface_name = product_matches.get_one::<String>("interface").unwrap();
+            let machine_readable = product_matches.get_flag("json");
+
+            match interface_type {
+                InterfaceType::CAN => {
+                    match application_message(
+                        &ComConnParams::for_can_conn(interface_name),
+                        PRODUCT_ID_REQ,
+                        Some(PRODUCT_ID_RES),
+                    ) {
+                        Ok(boards) => {
+                            if machine_readable {
+                                let devices = boards
+                                    .iter()
+                                    .map(|[node, family, identifier, feature_high, feature_low]| {
+                                        let feature = u16::from_be_bytes([*feature_high, *feature_low]);
+                                        format!("{{\"node\":{node},\"product_id\":[{family},{identifier},{feature}]}}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                println!("{{\"devices\":[{devices}]}}");
+                                return;
+                            }
+                            if boards.is_empty() {
+                                println!("No devices responded.");
+                            }
+                            for [node, family, identifier, feature_high, feature_low] in boards {
+                                println!(
+                                    "Device found[ {node} ]: product id {family}.{identifier}.{}",
+                                    u16::from_be_bytes([feature_high, feature_low])
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            if machine_readable {
+                                eprintln!("Failed to query product IDs: {}", error);
+                            } else {
+                                println!("Failed to query product IDs: {}", error);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                InterfaceType::Serial => println!("Serial not supported yet"),
                 InterfaceType::Ethernet => println!("Ethernet not supported yet"),
                 InterfaceType::Sim => println!("Sim not supported yet"),
             }
@@ -372,6 +537,15 @@ fn main() {
         _ => {
             println!("Unknown command");
         }
+    }
+}
+
+fn is_machine_readable(matches: &clap::ArgMatches) -> bool {
+    match matches.subcommand() {
+        Some(("search", sub_matches))
+        | Some(("firmware", sub_matches))
+        | Some(("product", sub_matches)) => sub_matches.get_flag("json"),
+        _ => false,
     }
 }
 
@@ -505,13 +679,7 @@ where
     I: ComInterface,
 {
     if I::is_network() {
-        let node_lst = {
-            let mut interface = I::create().unwrap();
-            interface.open(conn_params).unwrap();
-            interface.scan_network().unwrap()
-        };
-
-        for node in node_lst {
+        for node in scan_nodes::<I>(conn_params).unwrap() {
             let device = connect_device::<I>(conn_params, Some(node), None).unwrap();
             println!("Device found[{:3}]: {}", node, device);
         }
@@ -519,6 +687,15 @@ where
         let device = connect_device::<I>(conn_params, None, None).unwrap();
         println!("Device found: {}", device);
     }
+}
+
+fn scan_nodes<I>(conn_params: &ComConnParams) -> Result<Vec<u8>, Error>
+where
+    I: ComInterface,
+{
+    let mut interface = I::create()?;
+    interface.open(conn_params)?;
+    interface.scan_network()
 }
 
 /// Resets (restarts) a connected device.
@@ -868,30 +1045,31 @@ where
     device.flash(&hex_file).unwrap();
 }
 
-/// Sends a single CAN broadcast "wake-up" message to running applications, in order to trigger a restart bootloader mode.
-///
-/// This is intentionally minimal: it does **not** run the usual `connect_device` handshake
-/// (no device info read-out, no node targeting). It just opens the raw CAN interface and
-/// transmits one broadcast frame, then counts the amount of targets that responded to the wake-up request.
+/// Sends a broadcast application message and optionally waits for responses.
 ///
 /// # Arguments
 ///
-/// * `conn_params` - Connection parameters for the CAN interface (interface name, e.g. `can0`)
+/// * `conn_params` - Connection parameters for the interface
+/// * `request_type` - Request type for the application message
+/// * `response_type` - Response type for the application message
 ///
-/// # Panics
-///
-/// This function uses `.unwrap()` and will panic if the CAN interface cannot be opened or the
-/// frame cannot be sent.
-///
-/// # Examples
-///
-/// ```ignore
-/// wakeup_devices(&ComConnParams::for_can_conn("can0"));
-/// ```
-pub fn wakeup_devices(conn_params: &ComConnParams) {
-    let mut interface = CANInterface::create().unwrap();
-    interface.open(conn_params).unwrap();
-    interface.wakeup().expect("Failed to send wake-up message");
+fn application_message(
+    conn_params: &ComConnParams,
+    request_type: u16,
+    response_type: Option<u16>,
+) -> Result<Vec<[u8; 5]>, Error> {
+    let mut interface = CANInterface::create()?;
+    interface.open(conn_params)?;
+
+    let request = AppMsg::request(request_type).to_raw_data_array();
+    let responses = interface.application_message(&request, response_type)?;
+    match response_type {
+        Some(response_type) => responses
+            .iter()
+            .map(|response| process_response(response, response_type))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
 }
 
 // ================================================================================================
