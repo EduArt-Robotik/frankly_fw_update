@@ -68,6 +68,10 @@ if ! dpkg -l | grep -q debhelper; then
     missing_deps+=("debhelper")
 fi
 
+if ! command -v gbp &> /dev/null; then
+    missing_deps+=("git-buildpackage")
+fi
+
 if [ ${#missing_deps[@]} -ne 0 ]; then
     print_error "Missing system dependencies: ${missing_deps[*]}"
     print_info "Install them with:"
@@ -91,6 +95,27 @@ print_info "Cleaning previous builds..."
 cargo clean || true
 rm -rf debian/.debhelper debian/frankly-fw-update-* debian/files debian/*.substvars
 rm -f ../*.deb ../*.dsc ../*.tar.xz ../*.buildinfo ../*.changes
+
+# Sync version: Cargo.toml -> debian/changelog
+CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+DEB_REVISION=1
+DEB_VERSION="${CARGO_VERSION}-${DEB_REVISION}"
+CHANGELOG_VERSION=$(dpkg-parsechangelog -S Version)
+
+if [ -z "$CARGO_VERSION" ]; then
+    print_error "Could not read version from Cargo.toml"
+    exit 1
+fi
+
+if [ "$CHANGELOG_VERSION" != "$DEB_VERSION" ]; then
+    print_info "Updating debian/changelog: $CHANGELOG_VERSION -> $DEB_VERSION"
+    export DEBFULLNAME="EduArt Robotik GmbH"
+    export DEBEMAIL="lea.kempf@eduart-robotik.com"
+    gbp dch --release --new-version="$DEB_VERSION" \
+        --distribution=unstable --ignore-branch --auto
+else
+    print_info "debian/changelog already at $DEB_VERSION"
+fi
 
 # Build the package
 print_info "Building Debian packages..."
